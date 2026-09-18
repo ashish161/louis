@@ -3,13 +3,16 @@
 
   Search uses bundled yt-dlp when LOUIS_YOUTUBE_API_KEY is unset.
   A Data API key is recommended (faster search, moderate safeSearch on typed search).
-  Server proxy routes: /api/youtube/search, /api/youtube/videos, /api/youtube/playlist, /api/youtube/channel
+  Paste a Spotify playlist/album/track URL to resolve YouTube matches via spotDL.
+  Server proxy routes: /api/youtube/*, /api/spotify/*
 -->
 <script setup lang="ts">
 import { useYoutubePicker, YOUTUBE_PICKER_RESULTS_KEY } from './useYoutubePicker'
 import YoutubePickerResultsPane from './YoutubePickerResultsPane.vue'
 import YoutubePickerSearch from './YoutubePickerSearch.vue'
+import SpotifyPlaylistsBar from './SpotifyPlaylistsBar.vue'
 import { useYoutubeAudioPlayer, YOUTUBE_AUDIO_PLAYER_KEY } from './useYoutubeAudioPlayer'
+import type { SpotifyPlaylistSummary } from '#shared/spotifyTypes'
 
 const props = withDefaults(defineProps<{
   placeholders?: string[]
@@ -25,6 +28,7 @@ const DEFAULT_SEARCH_PLACEHOLDERS = [
   'Sesame Street',
   'Warren Zevon',
   'The Beach Boys',
+  'https://open.spotify.com/playlist/…',
 ]
 
 const appConfig = useAppConfig()
@@ -64,6 +68,7 @@ const {
   channelSummary,
   searchSource,
   toggleSelectAll,
+  loadSpotifyPlaylistUrl,
 } = useYoutubePicker(props.maxResults)
 
 provide(YOUTUBE_PICKER_RESULTS_KEY, results)
@@ -97,6 +102,10 @@ function onPlaceholderSearch(term: string) {
 
 async function onSelect(id: string) {
   await selectVideo(id)
+}
+
+function onSpotifyPlaylist(playlist: SpotifyPlaylistSummary) {
+  void loadSpotifyPlaylistUrl(playlist.url)
 }
 
 function onKeydown(event: KeyboardEvent) {
@@ -140,7 +149,7 @@ onUnmounted(() => {
     class="yt-picker"
     :class="embedded ? 'relative flex flex-col gap-2 sm:gap-3 h-full min-h-0' : 'relative'"
   >
-    <div :class="embedded ? 'shrink-0' : ''">
+    <div :class="embedded ? 'shrink-0 flex flex-col gap-2' : 'flex flex-col gap-2'">
       <YoutubePickerSearch
         v-model="query"
         :placeholders="searchPlaceholders"
@@ -149,6 +158,7 @@ onUnmounted(() => {
         @submit="onSearchSubmit"
         @clear="onClearSearch"
       />
+      <SpotifyPlaylistsBar @select="onSpotifyPlaylist" />
     </div>
 
     <div :class="embedded ? 'flex flex-1 min-h-0 flex-col overflow-hidden' : ''">
@@ -176,7 +186,7 @@ onUnmounted(() => {
         :selected-count="selectedCount"
         :all-importable-selected="allImportableSelected"
         :importable-count="importableCount"
-        :playlist-mode="playlistMode"
+        :playlist-mode="playlistMode || searchSource === 'spotify'"
         :fill="embedded"
         @search="onPlaceholderSearch"
         @select="onSelect"

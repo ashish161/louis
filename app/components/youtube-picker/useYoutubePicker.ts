@@ -13,11 +13,13 @@ import {
   classifyYoutubeSearchInput,
   type YoutubeChannelSummary,
 } from '#shared/myo-editor/youtubeUrl'
+import { parseSpotifyResource } from '#shared/spotifyUrl'
+import type { SpotifyResolveResponse } from '#shared/spotifyTypes'
 import { videosToPlaylistTracks } from '~/components/playlist/types'
 
 const MIN_SEARCH_LOADING_MS = 2000
 
-export type YoutubePickerSource = 'text' | 'playlist' | 'video' | 'channel'
+export type YoutubePickerSource = 'text' | 'playlist' | 'video' | 'channel' | 'spotify'
 
 export const YOUTUBE_PICKER_RESULTS_KEY: InjectionKey<Ref<YoutubeVideoSummary[]>>
   = Symbol('youtubePickerResults')
@@ -166,6 +168,69 @@ export function useYoutubePicker(maxResults = 12) {
       if (generation !== searchGeneration) return
       status.value = 'error'
     }
+  }
+
+  async function loadSpotifyResource(url: string, q: string) {
+    searchGeneration += 1
+    const generation = searchGeneration
+    const loadingStartedAt = Date.now()
+    submittedQuery.value = q
+    status.value = 'loading'
+    errorMessage.value = ''
+    focusedIndex.value = -1
+    results.value = []
+    nextPageToken.value = undefined
+    playlistSummary.value = null
+    activePlaylistId.value = null
+    skippedUnavailable.value = 0
+    skippedMissingDuration.value = 0
+    resetChannelState()
+    searchSource.value = 'spotify'
+    clearResultSelection()
+    playEvent('buttonClick')
+
+    try {
+      const data = await $fetch<SpotifyResolveResponse>('/api/spotify/resolve', {
+        query: { url },
+      })
+      if (generation !== searchGeneration) return
+
+      const mapped = mapPlaylistImportItems(data.items)
+      playlistSummary.value = data.playlist
+        ? {
+            id: data.playlist.id,
+            title: data.playlist.title,
+            channelTitle: data.playlist.channelTitle,
+            itemCount: data.playlist.itemCount,
+          }
+        : null
+      results.value = mapped.videos
+      skippedUnavailable.value = data.unmatched + mapped.skippedUnavailable
+      skippedMissingDuration.value = mapped.skippedMissingDuration
+      nextPageToken.value = undefined
+      precheckImportable(mapped.videos, true)
+      await ensureMinLoadingTime(loadingStartedAt)
+      if (generation !== searchGeneration) return
+      status.value = 'idle'
+    }
+    catch (err: unknown) {
+      if (generation !== searchGeneration) return
+      errorMessage.value = fetchErrorMessage(
+        err,
+        'Could not resolve Spotify playlist via spotDL',
+      )
+      results.value = []
+      resetPasteState()
+      await ensureMinLoadingTime(loadingStartedAt)
+      if (generation !== searchGeneration) return
+      status.value = 'error'
+    }
+  }
+
+  /** Public entry used by the Spotify playlists tray. */
+  async function loadSpotifyPlaylistUrl(url: string) {
+    query.value = url
+    await loadSpotifyResource(url, url)
   }
 
   async function loadMorePlaylist() {
@@ -347,6 +412,12 @@ export function useYoutubePicker(maxResults = 12) {
     }
 
     if (!pageToken) {
+      const spotify = parseSpotifyResource(q)
+      if (spotify) {
+        await loadSpotifyResource(spotify.url, q)
+        return
+      }
+
       const intent = classifyYoutubeSearchInput(q)
       if (intent.kind === 'playlist') {
         await loadPlaylist(intent.playlistId, q)
@@ -525,6 +596,7 @@ export function useYoutubePicker(maxResults = 12) {
     loadMore,
     selectVideo,
     moveFocus,
+    loadSpotifyPlaylistUrl,
   }
 }
 

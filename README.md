@@ -1,177 +1,230 @@
-# Louis! A Yoto Make Your Own (MYO) client backed by YouTube
+# Louis (fork) — Yoto MYO + YouTube, with Spotify import
 
 ![Louis](docs/images/louis-readme-banner.webp)
 
-Louis turns YouTube into audio playlists for your [Yoto](https://yotoplay.com/). Search or paste a link, arrange tracks, then Update — Louis downloads and transcodes. Linking a physical **Make Your Own (MYO)** card happens in the Yoto app, not here.
+Fork of [stuartromanek/louis](https://github.com/stuartromanek/louis) with **Spotify playlist import** via [spotDL](https://github.com/spotDL/spotify-downloader). Tracks are matched to YouTube, then downloaded and saved to [Yoto](https://yotoplay.com/) through Louis’s normal flow.
 
-Self-hosted **Nuxt** server app. Yoto OAuth token exchange and YouTube audio download (via yt-dlp) need a long-running server process, so a static export (Netlify/Vercel static, GitHub Pages, etc.) cannot power those flows.
+Louis turns YouTube into audio playlists for your Yoto. Search or paste a link, arrange tracks, then Update — Louis downloads and transcodes. Linking a physical **Make Your Own (MYO)** card happens in the Yoto app, not here.
 
-**Website:** [louis.romanek.us](https://louis.romanek.us/) · install guides, FAQ, and desktop downloads for end users.
+Self-hosted **Nuxt** server app. Yoto OAuth, Spotify OAuth, and YouTube audio download need a long-running server process — a static export cannot power those flows.
 
-Demo:
+**Personal use only.** You are responsible for complying with [YouTube’s Terms of Service](https://www.youtube.com/t/terms), Spotify’s terms, and applicable law when downloading audio.
 
-[https://github.com/user-attachments/assets/717ae10e-c22e-40ae-8175-acfed4fce100](https://github.com/user-attachments/assets/717ae10e-c22e-40ae-8175-acfed4fce100)
+## Official site install vs this fork
 
-[Website](https://louis.romanek.us/) · [Download](#download-desktop) · [Docker](#docker) · [Home Assistant](#home-assistant) · [Hosting](docs/HOSTING.md) · [Desktop docs](docs/DESKTOP.md) · [Contributing](CONTRIBUTING.md) · [Releases](docs/RELEASE.md)
+| | [louis.romanek.us](https://louis.romanek.us/) (official) | **This repo** (`ashish161/louis`) |
+| --- | --- | --- |
+| Desktop DMG / EXE | Yes | Build from source (see below) |
+| YouTube → Yoto | Yes | Yes |
+| Spotify playlists via spotDL | **No** | **Yes** |
 
-**Personal use only.** You are responsible for complying with [YouTube’s Terms of Service](https://www.youtube.com/t/terms) and applicable law when downloading audio.
+The app from the website will **not** pick up Spotify support. For Spotify, run **this checkout** (recommended: local Node), or build a desktop installer from it. You can keep the official app installed; use this fork separately when you need Spotify.
+
+Upstream site / docs: [louis.romanek.us](https://louis.romanek.us/) · [upstream repo](https://github.com/stuartromanek/louis)
 
 ## Features
 
 - Search YouTube and preview audio — **YouTube Data API** when configured (faster typed search, optional content filtering), otherwise bundled **yt-dlp**. Paste a video, Shorts, playlist, or channel URL in Search to load it; check rows to add them together
+- **Spotify playlists:** Connect Spotify or paste a playlist/album/track URL — [spotDL](https://github.com/spotDL/spotify-downloader) finds YouTube matches; Louis downloads/transcodes on Update like any other track
 - Browse your Yoto playlists. **New** names a playlist and creates it on Yoto right away (empty, or with tracks already picked in Search)
 - Drag-and-drop playlist editing (desktop); phone Search / Library flow with Add to playlist; **Add to Home**; phone Menu can Update every pending playlist at once
 - Playlist covers: generated art on create; **Artwork** to generate, upload, or crop a 5×7 cover. Rename or delete from the playlist menu
 - Auto-split long YouTube sources (>55 min) into Part tracks; trim intros/outros before save
 - Save / Update to Yoto with download and transcode progress; optional normalize for new YouTube extracts
-- Per-track 16×16 art (Yoto icon library, [yotoicons.com](https://yotoicons.com/), upload, or draw) — reconnect Yoto once if icon upload asks for `user:icons:manage`
-- Same app as **desktop** (macOS / Windows), **Docker**, or **Home Assistant** — installers are **unsigned** (Gatekeeper / SmartScreen may warn)
+- Per-track 16×16 art (Yoto icon library, [yotoicons.com](https://yotoicons.com/), upload, or draw)
 
-## Choose how to run
+## Choose how to run (this fork)
 
 | You want… | Start here |
 | --------- | ---------- |
-| Mac / Windows app, no Docker | [Download (desktop)](#download-desktop) |
-| Docker on a NAS / homelab | [Docker](#docker) · [Hosting](docs/HOSTING.md) |
+| **Spotify + local use (recommended)** | [Quick start (local)](#quick-start-local-with-spotify) |
+| Desktop app built from this fork | [Build desktop from this repo](#build-desktop-from-this-repo) |
+| Docker on a NAS / homelab | [Docker](#docker) |
 | Home Assistant on your LAN | [Home Assistant](#home-assistant) |
-| Local Node development | [Native development](#native-development) |
+| Official installers (no Spotify) | [louis.romanek.us](https://louis.romanek.us/#install) |
 
-## Download (desktop)
+## Quick start (local, with Spotify)
 
-Installers ship as **Assets** on each GitHub Release (same `vX.Y.Z` as Docker):
+### 1. Prerequisites
 
-**[Latest release](https://github.com/stuartromanek/louis/releases/latest)**
+- **Node.js 22+**
+- **[yt-dlp](https://github.com/yt-dlp/yt-dlp)** and **[ffmpeg](https://ffmpeg.org/)** on `PATH`
+- **[spotDL](https://github.com/spotDL/spotify-downloader)** on `PATH` — e.g. `pipx install spotdl` or `pip3 install --break-system-packages spotdl`
+- A **Yoto** client ID (bundled or from [yoto.dev](https://yoto.dev/get-started/start-here/))
+- A **Spotify** app from [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard)
 
-| Platform            | Asset                       |
-| ------------------- | --------------------------- |
-| macOS Apple Silicon | `Louis-<version>-arm64.dmg` |
-| macOS Intel         | `Louis-<version>-x64.dmg`   |
-| Windows             | `Louis-Setup-<version>.exe` |
+### 2. Clone and configure
 
-After install, the setup wizard asks for a Yoto client ID, then a **recommended** YouTube Data API key (Skip uses bundled yt-dlp). Prefer **Use default client** for Yoto, or bring your own from [yoto.dev](https://yoto.dev/get-started/start-here/) and paste `http://127.0.0.1:4010/api/yoto/auth/callback` into **Allowed Callback URLs**. Change keys later in **Settings → Advanced**. Details: [docs/DESKTOP.md](docs/DESKTOP.md).
+```bash
+git clone https://github.com/ashish161/louis.git
+cd louis
+cp .env.example .env
+npm install
+```
 
-Installers are currently **unsigned** (Gatekeeper / SmartScreen may warn). Signing notes: [docs/DESKTOP_SIGNING.md](docs/DESKTOP_SIGNING.md). End-user install walkthroughs: [louis.romanek.us](https://louis.romanek.us/#install).
+Edit `.env` (minimum for Spotify):
+
+```bash
+LOUIS_YOTO_CLIENT_ID=PK00MDKCVwWvOG8o3px3qSl57FhfUZxm
+# or your own yoto.dev public client ID
+
+LOUIS_SPOTIFY_CLIENT_ID=your_spotify_client_id
+LOUIS_SPOTIFY_CLIENT_SECRET=your_spotify_client_secret
+```
+
+**Spotify redirect URI:** the [Developer Dashboard](https://developer.spotify.com/dashboard/create) often **only accepts HTTPS** (and rejects `localhost`). You have two practical paths:
+
+| Goal | What to do |
+| ---- | ---------- |
+| **Paste playlist URLs only** (no Connect) | Client ID + secret in `.env` is enough. If create-app forces a redirect URI, add any HTTPS URL (see [docs/SPOTIFY.md](docs/SPOTIFY.md)) — you never have to click Connect. |
+| **Connect + list your playlists** | Use **HTTPS** redirect — easiest: [local mkcert](docs/SPOTIFY.md#option-a--local-https-with-mkcert-recommended-if-http-is-blocked) or [Cloudflare tunnel](docs/SPOTIFY.md#option-b--cloudflare-quick-tunnel-https-no-mkcert). |
+
+Example (local HTTPS — register this in the dashboard):
+
+```bash
+LOUIS_DEV_TLS_KEY=./127.0.0.1-key.pem
+LOUIS_DEV_TLS_CERT=./127.0.0.1.pem
+LOUIS_SPOTIFY_REDIRECT_URI=https://127.0.0.1:4000/api/spotify/auth/callback
+```
+
+Full walkthrough: **[docs/SPOTIFY.md](docs/SPOTIFY.md)**. Louis shows the exact `redirectUri` under **Spotify** in Search when credentials are set.
+
+### 3. Run
+
+```bash
+npm run dev
+```
+
+Open Louis at the same URL as your redirect (e.g. **https://127.0.0.1:4000** with mkcert, or **http://127.0.0.1:4000** if your dashboard still allows HTTP loopback).
+
+1. Connect **Yoto** as usual.
+2. **Paste a Spotify playlist URL** in Search, **or** expand **Spotify** → **Connect** (HTTPS redirect required).
+3. Select tracks → add to a Yoto playlist → **Update**.
+
+Public playlist URLs work with client ID/secret alone. **Connect** needs a saved **HTTPS** redirect URI for most new Spotify apps.
+
+Resolve results are cached ~10 minutes per playlist so spotDL is not re-run on every click.
+
+## Build desktop from this repo
+
+Official site DMGs do **not** include Spotify. To get a Mac/Windows app with this fork’s features:
+
+```bash
+npm install
+cp .env.example .env   # Spotify keys still needed at runtime / in app data
+npm run desktop:build:mac   # or desktop:build:win / desktop:build:host
+```
+
+Desktop OAuth uses port **4010**. Register Spotify redirect:
+
+`http://127.0.0.1:4010/api/spotify/auth/callback`
+
+and set `LOUIS_SPOTIFY_REDIRECT_URI` (or the desktop equivalent) to that URI. Details: [docs/DESKTOP.md](docs/DESKTOP.md).
+
+Installers from a local build are **unsigned** (Gatekeeper / SmartScreen may warn).
 
 ## Docker
 
-Docker includes Node, yt-dlp, and ffmpeg — you only need Docker and a Yoto client ID.
+This fork’s image build installs **spotDL** alongside yt-dlp and ffmpeg.
 
 ```bash
-git clone https://github.com/stuartromanek/louis.git
+git clone https://github.com/ashish161/louis.git
 cd louis
 cp .env.example .env
-# Paste Louis's bundled LOUIS_YOTO_CLIENT_ID or your own (see Self-host).
-# Recommended: LOUIS_YOUTUBE_API_KEY
+# Set LOUIS_YOTO_CLIENT_ID and LOUIS_SPOTIFY_CLIENT_ID / SECRET
 docker compose up -d --build
 ```
 
-Open Louis at the same origin other devices will use (this machine: [http://localhost:4000](http://localhost:4000); phones/tablets: `http://<host-ip-or-name>:4000`). Health: `GET /api/health`.
+Open Louis at [http://localhost:4000](http://localhost:4000) (or `http://<host-ip>:4000`). Register the matching Spotify redirect URI. Health: `GET /api/health`.
 
-Prebuilt images (multi-arch `linux/amd64` + `linux/arm64` on each `v*` release):
+Prebuilt images on Docker Hub / GHCR are from **upstream** and do **not** include Spotify — build from this repo for the fork.
 
-```bash
-docker pull stuartromanek/louis:latest
-# or pin: stuartromanek/louis:vX.Y.Z
-```
-
-Equivalent on GHCR: `ghcr.io/stuartromanek/louis:latest` (and `:vX.Y.Z`).
-
-> Docker Hub anonymous pull rate limits can apply on busy hosts; GHCR is an equivalent fallback with the same tags.
-
-**Homelab one-click:** Portainer app template, Coolify, and CasaOS notes — [docs/HOSTING.md](docs/HOSTING.md). Cut releases: [docs/RELEASE.md](docs/RELEASE.md).
+**Homelab notes:** [docs/HOSTING.md](docs/HOSTING.md).
 
 ## Home Assistant
 
-Install Louis from Supervisor as a custom add-on (wraps the same GHCR image; options map to `LOUIS_*`; audio under `/data/audio`; UI on host port **4000**, not ingress).
+Upstream add-on images do not include Spotify. To use this fork on HA, build/push your own image from this repo and point the add-on at it, or run Docker Compose on the host instead.
 
-1. **Settings → Add-ons → Add-on store → ⋮ → Repositories** → add `https://github.com/stuartromanek/louis`
-2. Install **Louis**. Defaults use Louis’s bundled Yoto client and `http://homeassistant.local:4000/api/yoto/auth/callback` — no yoto.dev app needed if you keep both. Change the redirect off that URI only with your **own** public client (see [DOCS.md](homeassistant/louis/DOCS.md)). **youtube_api_key** is recommended (Data API search); leave empty to search with bundled yt-dlp. **youtube_safe_search** (`none` / `moderate` / `strict`) applies to typed search only when a key is set.
-3. Open `http://homeassistant.local:4000` (or your host:port)
+Upstream HA install (no Spotify): add repo `https://github.com/stuartromanek/louis` in Supervisor. Docs: [homeassistant/louis/DOCS.md](homeassistant/louis/DOCS.md).
 
-Full options, redirect URI, and `cookie_secure` notes: [homeassistant/louis/DOCS.md](homeassistant/louis/DOCS.md). Sources live under `homeassistant/`; root `repository.yaml` + `louis/` symlinks are for Supervisor discovery.
-
-## Self-host
+## Self-host details
 
 ### 1. Yoto client ID
 
-Louis ships a **public** PKCE client ID (not a secret): `PK00MDKCVwWvOG8o3px3qSl57FhfUZxm`. Paste it into `LOUIS_YOTO_CLIENT_ID` when you open Louis at a redirect already registered on Louis’s Yoto app — same value as desktop **Use default client** / the HA add-on default. There is **no** silent fallback if the env var is empty.
+Louis ships a **public** PKCE client ID (not a secret): `PK00MDKCVwWvOG8o3px3qSl57FhfUZxm`. Paste it into `LOUIS_YOTO_CLIENT_ID` when you open Louis at a redirect already registered on Louis’s Yoto app. There is **no** silent fallback if the env var is empty.
 
 | Redirect (exact) | Client |
 | ---------------- | ------ |
 | `http://127.0.0.1:4010/api/yoto/auth/callback` | Louis bundled (desktop) — see [DESKTOP.md](docs/DESKTOP.md) |
 | `http://homeassistant.local:4000/api/yoto/auth/callback` | Louis bundled (HA default) |
+| `http://localhost:4000/api/yoto/auth/callback` | Usually needs **your own** yoto.dev client unless you register it |
 
-For any **other** origin (NAS IP, custom hostname, HTTPS domain), create your **own** public client at [yoto.dev](https://yoto.dev/get-started/start-here/) so you can register that exact `/api/yoto/auth/callback`, then use that client ID instead:
+For any **other** origin (NAS IP, custom hostname, HTTPS), create your **own** public client at [yoto.dev](https://yoto.dev/get-started/start-here/) and register that exact `/api/yoto/auth/callback`.
 
 | Setting | Value |
 | ------- | ----- |
-| **Allowed Callback URLs** (yoto.dev field name) | `http://<host-ip-or-name>:4000/api/yoto/auth/callback` or `https://your-domain/api/yoto/auth/callback` — same origin you open Louis |
+| **Allowed Callback URLs** | `http://<host>:4000/api/yoto/auth/callback` or `https://your-domain/api/yoto/auth/callback` |
 | Scopes | `offline_access user:content:view user:content:manage user:icons:manage` |
 
-Ports: desktop OAuth is **4010** (`127.0.0.1` only). Docker / Home Assistant / reverse proxy (Nginx Proxy Manager, etc.) use **4000**, or your HTTPS hostname with no port when TLS terminates at the proxy. Paste the callback into **Allowed Callback URLs** — not Login URI / Logout URI.
+Ports: desktop OAuth **4010**; Docker / local `npm run dev` **4000**.
 
 ### 2. YouTube API (recommended)
 
-A YouTube Data API v3 key is **recommended** for faster search and `safeSearch=moderate` on typed search. In [Google Cloud Console](https://console.cloud.google.com/): create or pick a project, [enable YouTube Data API v3](https://console.cloud.google.com/apis/library/youtube.googleapis.com), then [create an API key](https://console.cloud.google.com/apis/credentials). If Google asks **What data will you be accessing?**, choose **Public data** (not User data) — Louis only needs an API key for public video search, not Google user OAuth. Restricting the key to YouTube Data API v3 is optional but smart. Walkthrough: [YouTube Data API getting started](https://developers.google.com/youtube/v3/getting-started).
+A YouTube Data API v3 key is **recommended** for faster search. In [Google Cloud Console](https://console.cloud.google.com/): enable YouTube Data API v3, create an API key (Public data). Set `LOUIS_YOUTUBE_API_KEY`. Leave unset to search with yt-dlp only.
 
-Search still works without a key (bundled yt-dlp): slower, no safeSearch, and search can break on a different week than download. Leave `LOUIS_YOUTUBE_API_KEY` unset to use that path.
+### 3. Spotify + spotDL
 
-### 3. Environment
+| Variable | Notes |
+| -------- | ----- |
+| `LOUIS_SPOTIFY_CLIENT_ID` | Spotify Developer Dashboard client ID |
+| `LOUIS_SPOTIFY_CLIENT_SECRET` | Client secret (local only — never commit) |
+| `LOUIS_SPOTIFY_REDIRECT_URI` | Optional pin; default `${origin}/api/spotify/auth/callback` |
+| `LOUIS_SPOTDL_PATH` | Optional. Default `spotdl` |
 
-Copy [`.env.example`](.env.example). Use `LOUIS_*` **names** so the same file works for local dev, `docker compose`, and `docker run --env-file .env` without rebuilding the image. Legacy `NUXT_*` / `NUXT_PUBLIC_*` names still work as a deprecated fallback (`LOUIS_*` wins when both are set).
+Flow: Spotify metadata → `spotdl save --preload` (YouTube URLs) → Louis save uses yt-dlp + ffmpeg like other tracks.
+
+### 4. Environment reference
+
+Copy [`.env.example`](.env.example). Prefer `LOUIS_*` names (legacy `NUXT_*` still works; `LOUIS_*` wins).
 
 #### Required
 
-| Variable               | Notes            |
-| ---------------------- | ---------------- |
-| `LOUIS_YOTO_CLIENT_ID` | Public PKCE client ID — Louis bundled (`PK00…`) for pre-registered redirects, or your own from yoto.dev |
+| Variable | Notes |
+| -------- | ----- |
+| `LOUIS_YOTO_CLIENT_ID` | Public PKCE client ID |
 
 #### Yoto
 
-| Variable                   | Notes                                                                                                                                                                                                 |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `LOUIS_YOTO_REDIRECT_URI`  | Optional pin; must match the portal. Unset: Louis uses the Host the browser actually used. Prefer a hostname over a DHCP IP. Other devices cannot use the Docker host’s localhost                    |
-| `LOUIS_COOKIE_SECURE`      | OAuth cookie `Secure` flag. Docker image defaults `false` (LAN HTTP). Node-without-Docker: when unset, secure iff `NODE_ENV=production`. Set `true` behind HTTPS                                      |
+| Variable | Notes |
+| -------- | ----- |
+| `LOUIS_YOTO_REDIRECT_URI` | Optional pin; unset = request origin |
+| `LOUIS_COOKIE_SECURE` | Cookie `Secure` flag. Docker defaults `false` (LAN HTTP) |
 
 #### YouTube / audio
 
-| Variable                      | Notes                                                                                                                                                                                                     |
-| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `LOUIS_YOUTUBE_API_KEY`       | Recommended. YouTube Data API v3 (faster typed search). Unset: search without a key                                                                                                                     |
-| `LOUIS_YOUTUBE_SAFE_SEARCH`   | Typed-search content filtering when a Data API key is set: `none`, `moderate` (default), or `strict`. Desktop: **Settings → Advanced**; HA: **youtube_safe_search** option                                                                                               |
-| `LOUIS_AUDIO_WORK_DIR`         | Default `/data/audio` in Docker                                                                                                                                                                           |
-| `LOUIS_AUDIO_JOB_MAX_AGE_MS`   | Stale `jobs/` cleanup (default 1h)                                                                                                                                                                        |
-| `LOUIS_AUDIO_CACHE_MAX_AGE_MS` | Cache file TTL (default 14d)                                                                                                                                                                              |
-| `LOUIS_AUDIO_CACHE_MAX_BYTES`  | Combined preview + save cache cap (default 5 GiB)                                                                                                                                                         |
-| `LOUIS_YTDLP_PATH`             | Optional pin. Docker ships yt-dlp on `PATH`; Settings → Advanced can install a newer nightly into the audio volume / desktop app data (preferred when its version is newer) |
-| `LOUIS_YTDLP_COOKIES_FILE`     | Optional Netscape `cookies.txt`. Downloads try anonymously first; cookies are used only if YouTube blocks with bot check, hard 403, or age-gate. Prefer a throwaway Google account; never commit the file |
+| Variable | Notes |
+| -------- | ----- |
+| `LOUIS_YOUTUBE_API_KEY` | Recommended Data API key |
+| `LOUIS_YOUTUBE_SAFE_SEARCH` | `none` / `moderate` (default) / `strict` |
+| `LOUIS_AUDIO_WORK_DIR` | Default `/data/audio` in Docker |
+| `LOUIS_YTDLP_PATH` | Optional pin (default `yt-dlp`) |
+| `LOUIS_YTDLP_COOKIES_FILE` | Optional Netscape `cookies.txt` for blocked downloads |
 
-#### Advanced / debug
+#### Advanced
 
-| Variable                    | Notes                           |
-| --------------------------- | ------------------------------- |
+| Variable | Notes |
+| -------- | ----- |
 | `LOUIS_ENABLE_DEBUG_ROUTES` | `true` enables debug API routes |
 
-```bash
-docker run -p 4000:4000 --env-file .env louis:local
-```
-
-### 4. Deploy constraints
+### 5. Deploy constraints
 
 - **Single instance** — save-job progress is in memory
-- **HTTPS in production** — Docker image defaults OAuth cookies to `LOUIS_COOKIE_SECURE=false` (LAN HTTP). Node-without-Docker defaults to `secure` when `NODE_ENV=production`. Set `true` behind TLS / reverse proxy; keep `false` for plain HTTP (Portainer LAN, Home Assistant)
-- **Persistent disk** — recommended for the audio cache under `LOUIS_AUDIO_WORK_DIR` (`cache/preview/`, `cache/save/`). Stale `jobs/` dirs and old cache files are swept on startup and after downloads. Compose uses the named volume `louis-audio`
+- **HTTPS** — set `LOUIS_COOKIE_SECURE=true` behind TLS; keep `false` for plain LAN HTTP
+- **Persistent disk** — recommended for `LOUIS_AUDIO_WORK_DIR`
 
-## Native development
+## Native development (no Spotify extras)
 
-For local Node (without Docker), install these first:
-
-- Node.js 22+ (also used as yt-dlp’s JS runtime for YouTube signing)
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) — required for search (without a Data API key) and for save; keep it current
-- [ffmpeg](https://ffmpeg.org/) — required for save
-- Optional: `LOUIS_YOUTUBE_API_KEY` (faster search + `LOUIS_YOUTUBE_SAFE_SEARCH`); `LOUIS_YTDLP_COOKIES_FILE` as above
-
-Self-host web UI has no YouTube key field — set `LOUIS_YOUTUBE_API_KEY` and `LOUIS_YOUTUBE_SAFE_SEARCH` in `.env` (desktop app: **Settings → Advanced**).
+Same as [Quick start](#quick-start-local-with-spotify); Spotify vars and spotDL are optional if you only use YouTube.
 
 ```bash
 npm install
@@ -179,7 +232,7 @@ cp .env.example .env
 npm run dev
 ```
 
-Dev server: port **4000**. Tests: `npm test` (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+Dev server: port **4000**. Tests: `npm test`.
 
 Production without Docker:
 
@@ -195,3 +248,5 @@ MIT — see [LICENSE](LICENSE).
 Fonts (LT Saeada, self-hosted), OpenMoji icons, and [SND](https://snd.dev/) UI sounds are used; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 Security reports: [SECURITY.md](SECURITY.md).
+
+Upstream project: [stuartromanek/louis](https://github.com/stuartromanek/louis).

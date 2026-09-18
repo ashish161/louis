@@ -44,6 +44,11 @@ export const LOUIS_ENV_BINDINGS = [
   { path: 'yotoClientId', louis: 'LOUIS_YOTO_CLIENT_ID', nuxt: 'NUXT_YOTO_CLIENT_ID' },
   { path: 'yotoClientSecret', louis: 'LOUIS_YOTO_CLIENT_SECRET', nuxt: 'NUXT_YOTO_CLIENT_SECRET' },
   { path: 'yotoRedirectUri', louis: 'LOUIS_YOTO_REDIRECT_URI', nuxt: 'NUXT_YOTO_REDIRECT_URI' },
+  { path: 'spotifyClientId', louis: 'LOUIS_SPOTIFY_CLIENT_ID', nuxt: 'NUXT_SPOTIFY_CLIENT_ID' },
+  { path: 'spotifyClientSecret', louis: 'LOUIS_SPOTIFY_CLIENT_SECRET', nuxt: 'NUXT_SPOTIFY_CLIENT_SECRET' },
+  { path: 'spotifyRedirectUri', louis: 'LOUIS_SPOTIFY_REDIRECT_URI', nuxt: 'NUXT_SPOTIFY_REDIRECT_URI' },
+  { path: 'spotdlPath', louis: 'LOUIS_SPOTDL_PATH', nuxt: 'NUXT_SPOTDL_PATH' },
+  { path: 'spotdlSearchAttempts', louis: 'LOUIS_SPOTDL_SEARCH_ATTEMPTS', nuxt: 'NUXT_SPOTDL_SEARCH_ATTEMPTS' },
   { path: 'ytdlpPath', louis: 'LOUIS_YTDLP_PATH', nuxt: 'NUXT_YTDLP_PATH' },
   { path: 'ytdlpCookiesFile', louis: 'LOUIS_YTDLP_COOKIES_FILE', nuxt: 'NUXT_YTDLP_COOKIES_FILE' },
   /** Full yt-dlp `--js-runtimes` value, e.g. `node:/path/to/shim` (desktop) or `node`. */
@@ -159,6 +164,16 @@ export function louisRuntimeConfigDefaults() {
     yotoClientSecret: pickLouisEnv('LOUIS_YOTO_CLIENT_SECRET', 'NUXT_YOTO_CLIENT_SECRET'),
     // Empty: production derives `${request.origin}/api/yoto/auth/callback` (LAN / Portainer).
     yotoRedirectUri: pickLouisEnv('LOUIS_YOTO_REDIRECT_URI', 'NUXT_YOTO_REDIRECT_URI'),
+    spotifyClientId: pickLouisEnv('LOUIS_SPOTIFY_CLIENT_ID', 'NUXT_SPOTIFY_CLIENT_ID'),
+    spotifyClientSecret: pickLouisEnv('LOUIS_SPOTIFY_CLIENT_SECRET', 'NUXT_SPOTIFY_CLIENT_SECRET'),
+    // Empty: derives `${request.origin}/api/spotify/auth/callback` (local / LAN).
+    spotifyRedirectUri: pickLouisEnv('LOUIS_SPOTIFY_REDIRECT_URI', 'NUXT_SPOTIFY_REDIRECT_URI'),
+    spotdlPath: pickLouisEnv('LOUIS_SPOTDL_PATH', 'NUXT_SPOTDL_PATH') || 'spotdl',
+    // YouTube-Music search attempts per song inside spotDL (its hardcoded default is 3).
+    // Lower = faster, at a small risk of missing a song that would match on retry.
+    spotdlSearchAttempts: Number(
+      pickLouisEnv('LOUIS_SPOTDL_SEARCH_ATTEMPTS', 'NUXT_SPOTDL_SEARCH_ATTEMPTS') || 1,
+    ),
     ytdlpPath: pickLouisEnv('LOUIS_YTDLP_PATH', 'NUXT_YTDLP_PATH') || 'yt-dlp',
     ytdlpCookiesFile: pickLouisEnv('LOUIS_YTDLP_COOKIES_FILE', 'NUXT_YTDLP_COOKIES_FILE'),
     ytdlpJsRuntime: pickLouisEnv('LOUIS_YTDLP_JS_RUNTIME', 'NUXT_YTDLP_JS_RUNTIME') || 'node',

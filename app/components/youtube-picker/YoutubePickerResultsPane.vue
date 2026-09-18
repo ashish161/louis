@@ -44,6 +44,7 @@ const emit = defineEmits<{
 const loadingTitle = computed(() => {
   switch (props.searchSource) {
     case 'playlist': return 'Loading playlist'
+    case 'spotify': return 'Matching Spotify on YouTube'
     case 'video': return 'Loading video'
     case 'channel': return 'Loading channel'
     default: return 'Searching YouTube'
@@ -54,6 +55,7 @@ const loadingMeta = computed(() => {
   const q = props.query?.trim()
   switch (props.searchSource) {
     case 'playlist': return 'Fetching tracks from that YouTube playlist...'
+    case 'spotify': return 'spotDL is finding YouTube matches for that Spotify playlist...'
     case 'video': return 'Opening that YouTube video...'
     case 'channel': return 'Fetching videos from that channel...'
     default: return q ? `Looking for “${q}”...` : ''

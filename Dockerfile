@@ -11,7 +11,7 @@ RUN npm run build
 
 FROM node:22-bookworm-slim AS run
 
-# ffmpeg from apt; yt-dlp nightly from pip (Debian's package is years behind YouTube).
+# ffmpeg from apt; yt-dlp nightly + spotdl from pip (Debian's packages lag YouTube).
 # YTDLP_CACHE_BUST must change on each deploy/CI build so this layer is not reused from cache.
 ARG YTDLP_CACHE_BUST=manual
 RUN apt-get update \
@@ -22,7 +22,9 @@ RUN apt-get update \
     python3-pip \
   && echo "yt-dlp cache bust: ${YTDLP_CACHE_BUST}" \
   && pip3 install --no-cache-dir --break-system-packages --upgrade --pre 'yt-dlp[default]' \
+  && pip3 install --no-cache-dir --break-system-packages --upgrade spotdl \
   && yt-dlp --version \
+  && spotdl --version \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

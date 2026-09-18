@@ -2,7 +2,12 @@
 import { useUserPreferences } from '~/composables/useUserPreferences'
 import { useDesktopHost } from '~/composables/useDesktopHost'
 import { usePreferencesShell } from '~/composables/usePreferencesShell'
+import {
+  useServerSettings,
+  type ServerSettingsValues,
+} from '~/composables/useServerSettings'
 import DesktopApiKeysFields from '~/components/desktop/DesktopApiKeysFields.vue'
+import ServerCredentialsFields from '~/components/layout/ServerCredentialsFields.vue'
 import ToolsUpdateSection from '~/components/layout/ToolsUpdateSection.vue'
 import AppFlyout from '~/components/layout/AppFlyout.vue'
 import {
@@ -22,6 +27,7 @@ const {
   setSearchPlaceholdersFromText,
 } = useUserPreferences()
 const { isDesktop, desktopPrefsDebug, getConfig, setConfig, getRedirectUri } = useDesktopHost()
+const { fetchState: fetchServerSettings, save: saveServerSettings } = useServerSettings()
 const { open: shellOpen } = usePreferencesShell()
 
 const runtimeConfig = useRuntimeConfig()
@@ -41,6 +47,20 @@ const credentialsBaseline = ref({
   youtubeSafeSearch: YOUTUBE_SAFE_SEARCH_DEFAULT as YoutubeSafeSearch,
   ytdlpCookiesFile: '',
 })
+const serverYotoClientIdDraft = ref('')
+const serverYotoClientSecretDraft = ref('')
+const serverSpotifyClientIdDraft = ref('')
+const serverSpotifyClientSecretDraft = ref('')
+const serverSpotifyRedirectUriDraft = ref('')
+const serverSettingsBaseline = ref<ServerSettingsValues>({
+  yotoClientId: '',
+  yotoClientSecret: '',
+  spotifyClientId: '',
+  spotifyClientSecret: '',
+  spotifyRedirectUri: '',
+})
+const serverSettingsRestartRequired = ref(false)
+const serverActiveHint = ref('')
 const credentialsSaving = ref(false)
 const credentialsError = ref('')
 
@@ -49,20 +69,33 @@ const navId = 'user-prefs-nav'
 
 const formInteractive = computed(() => open.value && !credentialsSaving.value)
 
-const credentialsDirty = computed(() => {
-  if (!isDesktop.value) return false
+function serverSettingsDirty(): boolean {
   return (
-    yotoClientIdDraft.value.trim() !== credentialsBaseline.value.yotoClientId
-    || youtubeApiKeyDraft.value.trim() !== credentialsBaseline.value.youtubeApiKey
-    || youtubeSafeSearchDraft.value !== credentialsBaseline.value.youtubeSafeSearch
-    || ytdlpCookiesDraft.value.trim() !== credentialsBaseline.value.ytdlpCookiesFile
+    serverYotoClientIdDraft.value.trim() !== serverSettingsBaseline.value.yotoClientId
+    || serverYotoClientSecretDraft.value.trim() !== serverSettingsBaseline.value.yotoClientSecret
+    || serverSpotifyClientIdDraft.value.trim() !== serverSettingsBaseline.value.spotifyClientId
+    || serverSpotifyClientSecretDraft.value.trim() !== serverSettingsBaseline.value.spotifyClientSecret
+    || serverSpotifyRedirectUriDraft.value.trim() !== serverSettingsBaseline.value.spotifyRedirectUri
   )
+}
+
+const credentialsDirty = computed(() => {
+  if (isDesktop.value) {
+    return (
+      yotoClientIdDraft.value.trim() !== credentialsBaseline.value.yotoClientId
+      || youtubeApiKeyDraft.value.trim() !== credentialsBaseline.value.youtubeApiKey
+      || youtubeSafeSearchDraft.value !== credentialsBaseline.value.youtubeSafeSearch
+      || ytdlpCookiesDraft.value.trim() !== credentialsBaseline.value.ytdlpCookiesFile
+    )
+  }
+  return serverSettingsDirty()
 })
 
 const doneLabel = computed(() => {
   if (credentialsSaving.value) return 'Saving…'
   if (!credentialsDirty.value) return 'Done'
-  return desktopPrefsDebug.value ? 'Save' : 'Save & restart'
+  if (isDesktop.value) return desktopPrefsDebug.value ? 'Save' : 'Save & restart'
+  return 'Save'
 })
 
 function syncDraftFromPrefs() {
@@ -96,6 +129,36 @@ async function syncDesktopCredentials() {
   }
 }
 
+async function syncServerCredentials() {
+  credentialsError.value = ''
+  try {
+    const state = await fetchServerSettings()
+    serverYotoClientIdDraft.value = state.saved.yotoClientId
+    serverYotoClientSecretDraft.value = state.saved.yotoClientSecret
+    serverSpotifyClientIdDraft.value = state.saved.spotifyClientId
+    serverSpotifyClientSecretDraft.value = state.saved.spotifyClientSecret
+    serverSpotifyRedirectUriDraft.value = state.saved.spotifyRedirectUri
+    serverSettingsBaseline.value = state.saved
+    serverSettingsRestartRequired.value = state.restartRequired
+
+    const active: string[] = []
+    if (state.effective.yotoClientId) active.push('Yoto')
+    if (state.effective.spotifyClientId) active.push('Spotify')
+    serverActiveHint.value = active.length > 0
+      ? `Active now: ${active.join(' + ')} (from config / env)`
+      : 'No credentials are active yet — add them below and restart.'
+
+    // First-run / missing keys: land on Advanced where server credentials live.
+    if (!state.saved.yotoClientId.trim() && !state.effective.yotoClientId) {
+      prefsNav.value = 'advanced'
+    }
+  }
+  catch (err) {
+    credentialsError.value = err instanceof Error ? err.message : 'Could not load server settings'
+    prefsNav.value = 'advanced'
+  }
+}
+
 function setPrefsNav(next: PrefsNav) {
   if (!formInteractive.value || prefsNav.value === next) return
   prefsNav.value = next
@@ -105,7 +168,12 @@ function setPrefsNav(next: PrefsNav) {
 function beginOpen() {
   prefsNav.value = 'general'
   syncDraftFromPrefs()
-  void syncDesktopCredentials()
+  if (isDesktop.value) {
+    void syncDesktopCredentials()
+  }
+  else {
+    void syncServerCredentials()
+  }
   playEvent('toggleOn')
 }
 
@@ -178,11 +246,38 @@ async function saveDesktopCredentials(): Promise<boolean> {
   }
 }
 
-/** Done closes; if desktop API keys changed, save first (Electron restarts Nitro). */
+async function saveServerCredentials(): Promise<boolean> {
+  credentialsSaving.value = true
+  credentialsError.value = ''
+  playEvent('buttonPrimary')
+  try {
+    const state = await saveServerSettings({
+      yotoClientId: serverYotoClientIdDraft.value.trim(),
+      yotoClientSecret: serverYotoClientSecretDraft.value.trim(),
+      spotifyClientId: serverSpotifyClientIdDraft.value.trim(),
+      spotifyClientSecret: serverSpotifyClientSecretDraft.value.trim(),
+      spotifyRedirectUri: serverSpotifyRedirectUriDraft.value.trim(),
+    })
+    serverSettingsBaseline.value = state.saved
+    serverSettingsRestartRequired.value = state.restartRequired
+    return true
+  }
+  catch (err) {
+    credentialsError.value = err instanceof Error ? err.message : 'Save failed'
+    return false
+  }
+  finally {
+    credentialsSaving.value = false
+  }
+}
+
+/** Done closes; if credentials changed, save first (Electron restarts Nitro). */
 async function onDone() {
   if (!formInteractive.value) return
   if (credentialsDirty.value) {
-    const ok = await saveDesktopCredentials()
+    const ok = isDesktop.value
+      ? await saveDesktopCredentials()
+      : await saveServerCredentials()
     if (!ok) return
   }
   else {
@@ -342,6 +437,26 @@ watch(shellOpen, (isOpen) => {
                       :disabled="!formInteractive"
                       id-prefix="prefs"
                       :error="credentialsError"
+                    />
+                  </div>
+
+                  <div
+                    v-else
+                    class="prefs-projector__section"
+                  >
+                    <p class="prefs-projector__section-title">
+                      Server credentials
+                    </p>
+                    <ServerCredentialsFields
+                      v-model:yoto-client-id="serverYotoClientIdDraft"
+                      v-model:yoto-client-secret="serverYotoClientSecretDraft"
+                      v-model:spotify-client-id="serverSpotifyClientIdDraft"
+                      v-model:spotify-client-secret="serverSpotifyClientSecretDraft"
+                      v-model:spotify-redirect-uri="serverSpotifyRedirectUriDraft"
+                      :disabled="!formInteractive"
+                      :error="credentialsError"
+                      :restart-required="serverSettingsRestartRequired"
+                      :active-hint="serverActiveHint"
                     />
                   </div>
 

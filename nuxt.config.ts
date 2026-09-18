@@ -1,19 +1,72 @@
 import tailwindcss from '@tailwindcss/vite'
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { LOUIS_ENV_BINDINGS, louisRuntimeConfigDefaults } from './shared/louis-env.mjs'
+import { LOUIS_ENV_BINDINGS, louisRuntimeConfigDefaults, pickLouisEnv } from './shared/louis-env.mjs'
+import {
+  applyServerSettingsToEnv,
+  normalizeServerSettings,
+  serverSettingsFilePath,
+} from './shared/louis-settings.mjs'
 
 const packageJson = JSON.parse(
   readFileSync(fileURLToPath(new URL('./package.json', import.meta.url)), 'utf8'),
 ) as { version?: string }
 
+/**
+ * Server-settings file values win over .env so UI-saved credentials apply.
+ * Dev/native evaluate this config before Nitro boots; production re-reads the
+ * same file at runtime via the injected nitro preamble below.
+ */
+function overlayServerSettingsFile() {
+  try {
+    const file = serverSettingsFilePath(
+      pickLouisEnv('LOUIS_AUDIO_WORK_DIR', 'NUXT_AUDIO_WORK_DIR'),
+      tmpdir(),
+    )
+    if (!existsSync(file)) return
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as unknown
+    applyServerSettingsToEnv(process.env, normalizeServerSettings(raw))
+  }
+  catch {
+    // Best-effort: unreadable settings file must not block startup.
+  }
+}
+overlayServerSettingsFile()
+
 const louisEnv = louisRuntimeConfigDefaults()
 
 /** Injected into nitro.mjs immediately before _sharedRuntimeConfig is frozen. */
-const louisEnvAliasPreamble = `(()=>{try{const b=${JSON.stringify(
+const louisEnvAliasPreamble = `(()=>{try{
+const settingsFields=${JSON.stringify([
+  ['yotoClientId', 'LOUIS_YOTO_CLIENT_ID', 'NUXT_YOTO_CLIENT_ID'],
+  ['yotoClientSecret', 'LOUIS_YOTO_CLIENT_SECRET', 'NUXT_YOTO_CLIENT_SECRET'],
+  ['spotifyClientId', 'LOUIS_SPOTIFY_CLIENT_ID', 'NUXT_SPOTIFY_CLIENT_ID'],
+  ['spotifyClientSecret', 'LOUIS_SPOTIFY_CLIENT_SECRET', 'NUXT_SPOTIFY_CLIENT_SECRET'],
+  ['spotifyRedirectUri', 'LOUIS_SPOTIFY_REDIRECT_URI', 'NUXT_SPOTIFY_REDIRECT_URI'],
+])};
+const g=(n)=>typeof process.getBuiltinModule==="function"?process.getBuiltinModule(n):null;
+const fsN=g("node:fs"),osN=g("node:os"),pN=g("node:path");
+if(fsN&&osN&&pN){
+  const work=(process.env.LOUIS_AUDIO_WORK_DIR||process.env.NUXT_AUDIO_WORK_DIR||"").trim();
+  const tmp=osN.tmpdir?osN.tmpdir():process.env.TMPDIR||(process.platform==="win32"?"C:\\\\WINDOWS\\\\Temp":"/tmp");
+  const base=work||(tmp?pN.join(tmp,"yoto-cards-audio"):null);
+  if(base){
+    const file=pN.join(base,"settings.json");
+    if(fsN.existsSync(file)){
+      try{
+        const s=JSON.parse(fsN.readFileSync(file,"utf8"));
+        for(const[k,l,n]of settingsFields){const v=String(s[k]||"").trim();if(v){process.env[l]=v;process.env[n]=v;}}
+      }catch(eSettings){}
+    }
+  }
+}
+const b=${JSON.stringify(
   LOUIS_ENV_BINDINGS.map(({ louis, nuxt }) => [louis, nuxt]),
-)};for(const[l,n]of b){const v=process.env[l];if(v!=null&&String(v).trim()!=="")process.env[n]=String(v).trim()}}catch(_){}})();\n`
+)};
+for(const[l,n]of b){const v=process.env[l];if(v!=null&&String(v).trim()!=="")process.env[n]=String(v).trim()}
+}catch(ePreamble){}})();\n`
 
 /**
  * Nitro emits the server bundle under chunks/nitro/ on macOS/Linux, but often
@@ -139,7 +192,22 @@ export default defineNuxtConfig({
     },
   ],
   devServer: {
-    port: 4000,
+    // Bind loopback so Spotify OAuth matches 127.0.0.1 redirect URIs (not localhost).
+    host: process.env.LOUIS_DEV_HOST || '127.0.0.1',
+    port: Number(process.env.LOUIS_DEV_PORT || 4000),
+    https: (() => {
+      const keyPath = process.env.LOUIS_DEV_TLS_KEY?.trim()
+      const certPath = process.env.LOUIS_DEV_TLS_CERT?.trim()
+      if (!keyPath || !certPath) return false
+      if (!existsSync(keyPath) || !existsSync(certPath)) {
+        console.warn('[louis-dev] LOUIS_DEV_TLS_* set but cert files missing — dev server stays HTTP')
+        return false
+      }
+      return {
+        key: readFileSync(keyPath),
+        cert: readFileSync(certPath),
+      }
+    })(),
   },
   // Prefer LOUIS_* at runtime (see .env.example); legacy NUXT_* still works.
   // Production: nitro compiled hook aliases LOUIS_* → NUXT_* in nitro.mjs before freeze.
@@ -149,6 +217,11 @@ export default defineNuxtConfig({
     yotoClientId: louisEnv.yotoClientId,
     yotoClientSecret: louisEnv.yotoClientSecret,
     yotoRedirectUri: louisEnv.yotoRedirectUri,
+    spotifyClientId: louisEnv.spotifyClientId,
+    spotifyClientSecret: louisEnv.spotifyClientSecret,
+    spotifyRedirectUri: louisEnv.spotifyRedirectUri,
+    spotdlPath: louisEnv.spotdlPath,
+    spotdlSearchAttempts: louisEnv.spotdlSearchAttempts,
     ytdlpPath: louisEnv.ytdlpPath,
     // Optional Netscape cookies.txt for yt-dlp (LOUIS_YTDLP_COOKIES_FILE). Anon-first; used on escalate.
     ytdlpCookiesFile: louisEnv.ytdlpCookiesFile,
