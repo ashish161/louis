@@ -77,6 +77,37 @@ function youtubeIdFromSong(song: SpotdlSong): string | null {
     || extractYoutubeIdFromWatchLoose(downloadUrl)
 }
 
+/** Per-song mapping (null when spotDL emitted a null/unresolvable entry). */
+export function spotdlSongToImportItem(
+  rawSong: SpotdlSong | null | undefined,
+  index: number,
+): YoutubePlaylistImportItem | null {
+  // spotDL occasionally emits null entries (unresolvable on YouTube).
+  const song = rawSong ?? {}
+  const videoId = youtubeIdFromSong(song)
+  if (!videoId) return null
+
+  const durationSeconds = songDurationSeconds(song)
+  const position = typeof song.list_position === 'number'
+    ? song.list_position
+    : index + 1
+  const spotifyUrl = typeof song.url === 'string' ? song.url : ''
+  const playlistItemId = song.song_id?.trim()
+    || (spotifyUrl ? `spotify:${spotifyUrl}` : `spotdl:${position}:${videoId}`)
+
+  return {
+    playlistItemId,
+    videoId,
+    position,
+    title: spotdlSongTitle(song),
+    channelTitle: artistLabel(song),
+    thumbnailUrl: (song.cover_url || song.coverUrl || '').trim(),
+    duration: durationSeconds !== undefined ? formatDuration(durationSeconds) : undefined,
+    durationSeconds,
+    available: true,
+  }
+}
+
 export function mapSpotdlSongsToImportItems(
   songs: SpotdlSong[],
 ): { items: YoutubePlaylistImportItem[], unmatched: number } {
@@ -84,32 +115,12 @@ export function mapSpotdlSongsToImportItems(
   let unmatched = 0
 
   songs.forEach((rawSong, index) => {
-    // spotDL occasionally emits null entries (unresolvable on YouTube).
-    const song = rawSong ?? {}
-    const videoId = youtubeIdFromSong(song)
-    if (!videoId) {
+    const item = spotdlSongToImportItem(rawSong, index)
+    if (!item) {
       unmatched += 1
       return
     }
-    const durationSeconds = songDurationSeconds(song)
-    const position = typeof song.list_position === 'number'
-      ? song.list_position
-      : index
-    const spotifyUrl = typeof song.url === 'string' ? song.url : ''
-    const playlistItemId = song.song_id?.trim()
-      || (spotifyUrl ? `spotify:${spotifyUrl}` : `spotdl:${index}:${videoId}`)
-
-    items.push({
-      playlistItemId,
-      videoId,
-      position,
-      title: spotdlSongTitle(song),
-      channelTitle: artistLabel(song),
-      thumbnailUrl: (song.cover_url || song.coverUrl || '').trim(),
-      duration: durationSeconds !== undefined ? formatDuration(durationSeconds) : undefined,
-      durationSeconds,
-      available: true,
-    })
+    items.push(item)
   })
 
   return { items, unmatched }

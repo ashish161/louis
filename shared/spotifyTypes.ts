@@ -8,6 +8,8 @@ export interface SpotifyPlaylistSummary {
   imageUrl?: string
   ownerName?: string
   url: string
+  /** Spotify playlist snapshot_id — exact content-change fingerprint. */
+  snapshotId?: string
 }
 
 export interface SpotifyResolveResponse {

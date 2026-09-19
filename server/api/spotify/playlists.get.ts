@@ -3,6 +3,7 @@ import {
   isSpotifyConnected,
   listSpotifyUserPlaylists,
 } from '../../utils/spotify'
+import { warmSpotifyResolveSnapshots } from '../../utils/spotify-resolve-cache'
 
 export default defineEventHandler(async (event) => {
   if (!isSpotifyConfigured(event)) {
@@ -22,8 +23,13 @@ export default defineEventHandler(async (event) => {
   const limit = query.limit ? Number(query.limit) : 50
   const offset = query.offset ? Number(query.offset) : 0
 
-  return await listSpotifyUserPlaylists(event, {
+  const result = await listSpotifyUserPlaylists(event, {
     limit: Number.isFinite(limit) ? limit : 50,
     offset: Number.isFinite(offset) ? offset : 0,
   })
+
+  // Background, metadata-only snapshot warm so the next resolve hard/soft-hits.
+  void warmSpotifyResolveSnapshots(event, result.items).catch(() => {})
+
+  return result
 })

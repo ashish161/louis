@@ -12,13 +12,23 @@ import {
   type SpotifyResourceRef,
 } from '../../shared/spotifyUrl.ts'
 import {
-  mapSpotdlSongsToImportItems,
   parseSpotdlSaveJson,
   spotdlArtistLabel,
+  spotdlSongToImportItem,
   spotdlSongTitle,
   type SpotdlSong,
 } from '../../shared/spotdlMap.ts'
+import {
+  SPOTIFY_RESOLVE_CACHE_VERSION,
+  cacheKeysForSongs,
+  importItemFromCached,
+  materializeCachedItems,
+  songResolveKey,
+  splitReusableKeys,
+  type CachedSpotResolveItem,
+} from '../../shared/spotifyResolveCache.ts'
 import { getSpotifyConfig, fetchSpotifyPlaylistSummary } from './spotify'
+import { loadSpotifyResolveCache, writeSpotifyResolveCache } from './spotify-resolve-cache'
 import { withRequestCtx } from './request-context'
 import { searchYoutubeViaYtdlp } from './youtube-ytdlp-discovery'
 import { scoreYoutubeFallbackMatch, formatSeconds } from '#shared/youtubeFallbackMatch'
@@ -34,6 +44,12 @@ const YOUTUBE_FALLBACK_MAX_SEARCHES = 60
 
 /** Ignore fallback matches this weak (kills incidental title-token hits). */
 const YOUTUBE_FALLBACK_MIN_SCORE = 20
+
+/**
+ * When a cached resolve is missing only a few tracks, preload those individually
+ * instead of re-running the whole playlist through spotDL.
+ */
+const SPOTIFY_RESOLVE_INCREMENTAL_MAX_PRELOAD = 6
 
 export interface SpotdlStatus {
   available: boolean
@@ -182,39 +198,32 @@ export async function getSpotdlStatus(event: H3Event): Promise<SpotdlStatus> {
  *
  * spotDL's preload save stores unresolvable songs as null entries, so the
  * names of those songs are recovered from a fast metadata-only spotdl dump
- * (no `--preload`) keyed by playlist position. Tries `artist - title`, then
- * bare `title` (nursery recordings are usually indexed under their title, not
- * a Spotify artist). Capped per resolve to bound wall-clock time.
+ * (no `--preload`) keyed by playlist position — supplied by the caller.
+ * `alreadyMatched` is the set of resolve keys (song ids / `pos:N`) that were
+ * handled by spotDL or the cache; only other positions are searched. Tries
+ * `artist - title`, then bare `title` (nursery recordings are usually indexed
+ * under their title, not a Spotify artist). Capped per resolve to bound
+ * wall-clock time.
  */
 async function youtubeFallbackForUnmatchedSongs(
   event: H3Event,
-  songs: SpotdlSong[],
-  resource: SpotifyResourceRef,
+  metadataSongs: SpotdlSong[],
+  alreadyMatched: Set<string>,
 ): Promise<{ items: YoutubePlaylistImportItem[], found: number, skipped: boolean }> {
-  const unmatchedPositions = songs
-    .map((song, index) => ({ song, index }))
-    .filter(({ song }) => !song || !Boolean(song.download_url || song.downloadUrl))
-    .slice(0, YOUTUBE_FALLBACK_MAX_SEARCHES)
-    .map(({ index }) => index)
-
-  if (unmatchedPositions.length === 0) return { items: [], found: 0, skipped: false }
-
-  let metadataSongs: SpotdlSong[]
-  try {
-    metadataSongs = await runSpotdlSave(event, resource, { preload: false })
-  }
-  catch (err) {
-    console.warn(
-      `${withRequestCtx(event, '[spotdl]')} spotdl metadata dump failed; skipping yt fallback (not caching): ${err instanceof Error ? err.message : String(err)}`,
-    )
-    return { items: [], found: 0, skipped: true }
-  }
   if (metadataSongs.length === 0) {
     console.warn(
       `${withRequestCtx(event, '[spotdl]')} spotdl metadata dump empty; skipping yt fallback (not caching)`,
     )
     return { items: [], found: 0, skipped: true }
   }
+
+  const unmatchedPositions = metadataSongs
+    .map((song, index) => ({ song, index }))
+    .filter(({ song, index }) => !alreadyMatched.has(songResolveKey(song, index)))
+    .slice(0, YOUTUBE_FALLBACK_MAX_SEARCHES)
+    .map(({ index }) => index)
+
+  if (unmatchedPositions.length === 0) return { items: [], found: 0, skipped: false }
 
   const items: YoutubePlaylistImportItem[] = []
   let found = 0
@@ -394,24 +403,157 @@ export async function resolveSpotifyResourceToYoutube(
     `${withRequestCtx(event, '[spotdl]')} resolve start ${resource.kind}=${resource.id} ${resource.url}${options?.bypassCache ? ' (bypassCache)' : ''}`,
   )
   const startedAt = Date.now()
-  const songs = await runSpotdlSave(event, resource, { preload: true })
-  const spotdlMap = mapSpotdlSongsToImportItems(songs)
-  console.info(
-    `${withRequestCtx(event, '[spotdl]')} resolve done ${resource.kind}=${resource.id} in ${Date.now() - startedAt}ms -> ${spotdlMap.items.length} items, ${spotdlMap.unmatched} unmatched (spotdl pass)`,
-  )
 
-  // Fallback: spotDL only searches YouTube Music. Hunt unmatched songs on
-  // plain YouTube (kids' songs, nursery rhymes, etc.) via Louis's yt-dlp.
-  const fallback = await youtubeFallbackForUnmatchedSongs(event, songs, resource)
-  const items = [...spotdlMap.items, ...fallback.items]
-  const unmatched = spotdlMap.unmatched - fallback.found
-  console.info(
-    `${withRequestCtx(event, '[spotdl]')} resolve done (with fallback) -> ${items.length} items, ${unmatched} unmatched (yt fallback found ${fallback.found}${fallback.skipped ? ', SKIPPED' : ''})`,
-  )
+  // Snapshot id doubles as the exact content fingerprint for playlists —
+  // when it matches the cached entry, the whole resolve is already known.
+  let summary: Awaited<ReturnType<typeof fetchSpotifyPlaylistSummary>>
+  let snapshotId: string | undefined
+  if (resource.kind === 'playlist') {
+    summary = await fetchSpotifyPlaylistSummary(event, resource.id)
+    snapshotId = summary?.snapshotId
+  }
+
+  let disk = await loadSpotifyResolveCache(event, resource.kind, resource.id)
+
+  // Hard hit: playlists only. Identical snapshot + full cached mapping = done,
+  // no spotDL run at all.
+  if (
+    !options?.bypassCache
+    && resource.kind === 'playlist'
+    && snapshotId
+    && disk
+    && disk.snapshotId === snapshotId
+    && disk.keys.length > 0
+    && disk.keys.every(key => Boolean(disk!.perSong[key]))
+  ) {
+    const items = materializeCachedItems(disk)
+    console.info(
+      `${withRequestCtx(event, '[spotdl]')} resolve cache HARD hit ${resource.kind}=${resource.id} (snapshot ${snapshotId.slice(0, 12)}…) -> ${items.length} items in ${Date.now() - startedAt}ms`,
+    )
+    const value: SpotifyResolveResponse = {
+      playlist: {
+        id: resource.id,
+        title: summary?.name || 'Spotify playlist',
+        channelTitle: summary?.ownerName || 'Spotify',
+        itemCount: summary?.trackCount ?? items.length,
+        spotifyId: resource.id,
+        spotifyUrl: resource.url,
+      },
+      items,
+      unmatched: 0,
+      resolver: 'spotdl',
+    }
+    resolveCache.set(cacheKey, { until: Date.now() + RESOLVE_CACHE_MS, value })
+    return value
+  }
+
+  // Fast metadata-only pass (no YTM search) — needed for keys/identity.
+  const metadataSongs = await runSpotdlSave(event, resource, { preload: false })
+  const keys = cacheKeysForSongs(metadataSongs)
+  const { reusable, missing } = splitReusableKeys(disk, metadataSongs)
+
+  const merged: Record<string, CachedSpotResolveItem> = {}
+  let mode: 'soft' | 'incremental' | 'full' = 'full'
+
+  if (missing.length === 0) {
+    // Soft hit: every current song has a cached mapping — skip the preload pass.
+    for (const key of reusable) merged[key] = disk!.perSong[key]
+    mode = 'soft'
+    console.info(
+      `${withRequestCtx(event, '[spotdl]')} resolve cache SOFT hit ${resource.kind}=${resource.id} -> ${keys.length} items reused`,
+    )
+  }
+  else if (reusable.length > 0 && missing.length <= SPOTIFY_RESOLVE_INCREMENTAL_MAX_PRELOAD) {
+    // Incremental: preload only the few new/changed tracks individually.
+    const notYet = new Set(missing)
+    for (const key of reusable) merged[key] = disk!.perSong[key]
+
+    for (const key of missing) {
+      const index = keys.indexOf(key)
+      const meta = metadataSongs[index]
+      const trackUrl = typeof meta?.url === 'string' && meta.url.trim() ? meta.url.trim() : ''
+      if (!trackUrl) continue
+      const trackRef = parseSpotifyResource(trackUrl)
+      if (!trackRef) continue
+      try {
+        const resolved = await runSpotdlSave(event, trackRef, { preload: true })
+        const item = spotdlSongToImportItem(resolved[0] ?? null, index)
+        if (item) {
+          merged[key] = { ...item, matchedBy: 'spotdl' }
+          notYet.delete(key)
+        }
+        else {
+          console.info(
+            `${withRequestCtx(event, '[spotdl]')} incremental preload left "${spotdlSongTitle(meta ?? {})}" unmatched`,
+          )
+        }
+      }
+      catch (err) {
+        console.warn(
+          `${withRequestCtx(event, '[spotdl]')} incremental preload failed for "${spotdlSongTitle(meta ?? {})}": ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+    }
+
+    const fallback = await youtubeFallbackForUnmatchedSongs(
+      event,
+      metadataSongs,
+      new Set(keys.filter(key => !notYet.has(key))),
+    )
+    for (const fb of fallback.items) {
+      const key = keys[fb.position - 1]
+      if (key && !merged[key]) {
+        merged[key] = { ...fb, matchedBy: 'yt-fallback' }
+        notYet.delete(key)
+      }
+    }
+    mode = 'incremental'
+    console.info(
+      `${withRequestCtx(event, '[spotdl]')} resolve cache INCREMENTAL reuse for ${resource.kind}=${resource.id}: ${missing.length} new (${notYet.size} still unmatched), ${reusable.length} reused`,
+    )
+  }
+  else {
+    // Cold / too much change — one full preload pass (legacy behavior).
+    const preloadSongs = await runSpotdlSave(event, resource, { preload: true })
+    const matched = new Set<string>()
+    preloadSongs.forEach((song, index) => {
+      const item = spotdlSongToImportItem(song, index)
+      const key = keys[index]
+      if (item && key) {
+        merged[key] = { ...item, matchedBy: 'spotdl' }
+        matched.add(key)
+      }
+    })
+
+    const fallback = await youtubeFallbackForUnmatchedSongs(event, metadataSongs, matched)
+    for (const fb of fallback.items) {
+      const key = keys[fb.position - 1]
+      if (key && !merged[key]) merged[key] = { ...fb, matchedBy: 'yt-fallback' }
+    }
+    mode = 'full'
+    console.info(
+      `${withRequestCtx(event, '[spotdl]')} resolve done ${resource.kind}=${resource.id} in ${Date.now() - startedAt}ms (full pass, yt fallback found ${fallback.found}${fallback.skipped ? ', SKIPPED' : ''})`,
+    )
+  }
+
+  const items = keys
+    .map((key, index) => (merged[key] ? importItemFromCached(merged[key], index) : null))
+    .filter((item): item is NonNullable<typeof item> => Boolean(item))
+  const unmatched = keys.length - items.length
+
+  // Persist so the next resolve can hard/soft-hit.
+  await writeSpotifyResolveCache(event, resource.kind, resource.id, {
+    version: SPOTIFY_RESOLVE_CACHE_VERSION,
+    kind: resource.kind,
+    id: resource.id,
+    snapshotId,
+    keys,
+    perSong: merged,
+    updatedAt: Date.now(),
+  })
 
   let playlist: SpotifyResolveResponse['playlist']
   if (resource.kind === 'playlist') {
-    const summary = await fetchSpotifyPlaylistSummary(event, resource.id)
     playlist = {
       id: resource.id,
       title: summary?.name || 'Spotify playlist',
@@ -422,11 +564,11 @@ export async function resolveSpotifyResourceToYoutube(
     }
   }
   else if (resource.kind === 'album') {
-    const albumName = songs[0]?.album_name?.trim()
+    const albumName = metadataSongs[0]?.album_name?.trim()
     playlist = {
       id: resource.id,
-      title: albumName || spotdlSongTitle(songs[0] || {}) || 'Spotify album',
-      channelTitle: spotdlArtistLabel(songs[0] || {}),
+      title: albumName || spotdlSongTitle(metadataSongs[0] || {}) || 'Spotify album',
+      channelTitle: spotdlArtistLabel(metadataSongs[0] || {}),
       itemCount: items.length + unmatched,
       spotifyId: resource.id,
       spotifyUrl: resource.url,
@@ -435,8 +577,8 @@ export async function resolveSpotifyResourceToYoutube(
   else {
     playlist = {
       id: resource.id,
-      title: spotdlSongTitle(songs[0] || {}) || 'Spotify track',
-      channelTitle: spotdlArtistLabel(songs[0] || {}),
+      title: spotdlSongTitle(metadataSongs[0] || {}) || 'Spotify track',
+      channelTitle: spotdlArtistLabel(metadataSongs[0] || {}),
       itemCount: items.length + unmatched,
       spotifyId: resource.id,
       spotifyUrl: resource.url,
@@ -449,8 +591,9 @@ export async function resolveSpotifyResourceToYoutube(
     unmatched,
     resolver: 'spotdl',
   }
-  if (!fallback.skipped) {
-    resolveCache.set(cacheKey, { until: Date.now() + RESOLVE_CACHE_MS, value })
-  }
+  resolveCache.set(cacheKey, { until: Date.now() + RESOLVE_CACHE_MS, value })
+  console.info(
+    `${withRequestCtx(event, '[spotdl]')} resolve finish (${mode}) ${resource.kind}=${resource.id} -> ${items.length} items, ${unmatched} unmatched`,
+  )
   return value
 }

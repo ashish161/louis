@@ -128,6 +128,7 @@ interface SpotifyPlaylistApiItem {
   tracks?: { total?: number }
   owner?: { display_name?: string | null }
   external_urls?: { spotify?: string }
+  snapshot_id?: string
 }
 
 interface SpotifyPlaylistsPage {
@@ -158,6 +159,7 @@ function mapPlaylist(item: SpotifyPlaylistApiItem): SpotifyPlaylistSummary | nul
     imageUrl: pickImage(item.images),
     ownerName: item.owner?.display_name?.trim() || undefined,
     url: item.external_urls?.spotify?.trim() || spotifyOpenUrl('playlist', id),
+    snapshotId: item.snapshot_id?.trim() || undefined,
   }
 }
 
@@ -209,7 +211,7 @@ export async function fetchSpotifyPlaylistSummary(
       `${SPOTIFY_API_BASE_URL}/playlists/${encodeURIComponent(playlistId)}`,
       {
         headers: { Authorization: `Bearer ${token}` },
-        query: { fields: 'id,name,description,images,tracks.total,owner.display_name,external_urls' },
+        query: { fields: 'id,name,description,images,tracks.total,owner.display_name,external_urls,snapshot_id' },
       },
     )
     return mapPlaylist(item)
