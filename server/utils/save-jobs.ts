@@ -57,6 +57,13 @@ import { createExtractPipeline } from './extract-pipeline'
 /** Process-local only — cleared on every container restart/redeploy. */
 const jobs = new Map<string, SaveJobState>()
 
+/**
+ * Concurrent yt-dlp downloads per save job. Each download is retried with
+ * backoff and cookies escalation, so keep this modest to avoid tripping
+ * YouTube bot checks on parallel hits.
+ */
+const MAX_PARALLEL_YOUTUBE_DOWNLOADS = 3
+
 export type SaveTarget =
   | { operation: 'create' }
   | { operation: 'update'; cardId: string }
@@ -675,81 +682,92 @@ async function runSaveJob(
 
     const pipeline = createExtractPipeline()
     let extractFatal: unknown
-    let snapshotChain = Promise.resolve()
     const groupRuns: Promise<void>[] = []
 
-    for (const youtubeId of uniqueYoutubeIds) {
-      const snapshot = snapshotChain.then(async () => {
-        if (extractFatal) throw extractFatal
-        return snapshotGroup(youtubeId)
-      })
-      snapshotChain = snapshot.then(() => undefined, (err) => {
-        extractFatal = extractFatal ?? err
-      })
-      groupRuns.push((async () => {
-        try {
-          const parts = await snapshot
-          if (parts.length === 0) return
-          await pipeline.run(parts.length, {
-            prepare: index => preparePart(parts[index]!),
-            put: async (index, prepared) => {
-              if (extractFatal) throw extractFatal
-              const part = parts[index]!
-              updateTrack(job, part.playlistIndex, 'uploading')
-              reportExtractProgress()
-              return putAudioForTranscode(accessToken, prepared.filePath, prepared.filename, {
-                meta: {
-                  jobId,
-                  youtubeId: part.youtubeId,
-                  title: part.title,
-                  durationSeconds: prepared.durationSeconds,
-                  partLabel: part.partLabel,
-                },
-              })
-            },
-            poll: async (index, putResult) => {
-              const part = parts[index]!
-              const transcoded = await pollPutAudioTranscode(accessToken, putResult, {
-                meta: {
-                  jobId,
-                  youtubeId: part.youtubeId,
-                  title: part.title,
-                  durationSeconds: part.durationSeconds,
-                  partLabel: part.partLabel,
-                },
-                withPutSlot: fn => pipeline.withPutSlot(fn),
-                onTranscodePoll: ({ percent }) => {
-                  updateTrack(job, part.playlistIndex, 'transcoding')
-                  transcodePercentByIndex.set(part.playlistIndex, percent ?? 50)
-                  reportExtractProgress()
-                },
-              })
-              if (part.cacheKey && part.sourceSha256) {
-                await writeSplitPartTranscodeCache(
-                  audioWorkDir,
-                  part.cacheKey,
-                  transcoded,
-                  part.sourceSha256,
-                )
-              }
-              finishExtractedPart(part.playlistIndex, transcoded)
-              reportExtractProgress()
-              return transcoded
+    async function runGroupPipeline(parts: ExtractPartWork[]) {
+      await pipeline.run(parts.length, {
+        prepare: index => preparePart(parts[index]!),
+        put: async (index, prepared) => {
+          if (extractFatal) throw extractFatal
+          const part = parts[index]!
+          updateTrack(job, part.playlistIndex, 'uploading')
+          reportExtractProgress()
+          return putAudioForTranscode(accessToken, prepared.filePath, prepared.filename, {
+            meta: {
+              jobId,
+              youtubeId: part.youtubeId,
+              title: part.title,
+              durationSeconds: prepared.durationSeconds,
+              partLabel: part.partLabel,
             },
           })
-        }
-        catch (err) {
-          extractFatal = extractFatal ?? err
-          throw err
-        }
-      })())
+        },
+        poll: async (index, putResult) => {
+          const part = parts[index]!
+          const transcoded = await pollPutAudioTranscode(accessToken, putResult, {
+            meta: {
+              jobId,
+              youtubeId: part.youtubeId,
+              title: part.title,
+              durationSeconds: part.durationSeconds,
+              partLabel: part.partLabel,
+            },
+            withPutSlot: fn => pipeline.withPutSlot(fn),
+            onTranscodePoll: ({ percent }) => {
+              updateTrack(job, part.playlistIndex, 'transcoding')
+              transcodePercentByIndex.set(part.playlistIndex, percent ?? 50)
+              reportExtractProgress()
+            },
+          })
+          if (part.cacheKey && part.sourceSha256) {
+            await writeSplitPartTranscodeCache(
+              audioWorkDir,
+              part.cacheKey,
+              transcoded,
+              part.sourceSha256,
+            )
+          }
+          finishExtractedPart(part.playlistIndex, transcoded)
+          reportExtractProgress()
+          return transcoded
+        },
+      })
     }
 
+    // Snapshots (download + replan) run in parallel up to a cap. Each group's
+    // prepare/put/poll pipeline still overlaps later groups' downloads because
+    // runGroupPipeline is detached from the worker loop.
+    let snapshotCursor = 0
+    async function downloadWorker() {
+      while (true) {
+        if (extractFatal) throw extractFatal
+        const index = snapshotCursor++
+        if (index >= uniqueYoutubeIds.length) return
+        const youtubeId = uniqueYoutubeIds[index]!
+        const parts = await snapshotGroup(youtubeId).catch((err) => {
+          extractFatal = extractFatal ?? err
+          throw err
+        })
+        if (extractFatal) throw extractFatal
+        if (parts.length === 0) continue
+        groupRuns.push(
+          runGroupPipeline(parts).catch((err) => {
+            extractFatal = extractFatal ?? err
+            throw err
+          }),
+        )
+      }
+    }
+
+    const workerCount = Math.min(MAX_PARALLEL_YOUTUBE_DOWNLOADS, uniqueYoutubeIds.length)
+    const workerResults = await Promise.allSettled(
+      Array.from({ length: workerCount }, () => downloadWorker()),
+    )
     const groupResults = await Promise.allSettled(groupRuns)
-    const groupFailure = groupResults.find(
+    const extractFailure = [...workerResults, ...groupResults].find(
       (result): result is PromiseRejectedResult => result.status === 'rejected',
     )
-    if (groupFailure) throw groupFailure.reason
+    if (extractFailure) throw extractFailure.reason
 
     const extractCount = extractActions.length
 
