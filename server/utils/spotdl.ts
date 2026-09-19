@@ -6,6 +6,7 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 import type { H3Event } from 'h3'
 import type { SpotifyResolveResponse } from '../../shared/spotifyTypes.ts'
+import type { YoutubePlaylistImportItem } from '../../shared/myo-editor/youtubePlaylistImport.ts'
 import {
   parseSpotifyResource,
   type SpotifyResourceRef,
@@ -15,15 +16,24 @@ import {
   parseSpotdlSaveJson,
   spotdlArtistLabel,
   spotdlSongTitle,
+  type SpotdlSong,
 } from '../../shared/spotdlMap.ts'
 import { getSpotifyConfig, fetchSpotifyPlaylistSummary } from './spotify'
 import { withRequestCtx } from './request-context'
+import { searchYoutubeViaYtdlp } from './youtube-ytdlp-discovery'
+import { scoreYoutubeFallbackMatch, formatSeconds } from '#shared/youtubeFallbackMatch'
 
 const execFileAsync = promisify(execFile)
 
 /** In-memory resolve cache — avoids re-running spotDL for the same playlist in one session. */
 const resolveCache = new Map<string, { until: number, value: SpotifyResolveResponse }>()
 const RESOLVE_CACHE_MS = 10 * 60_000
+
+/** Hard cap on per-resolve YouTube-search fallbacks (yt-dlp discovery is 2-at-a-time). */
+const YOUTUBE_FALLBACK_MAX_SEARCHES = 60
+
+/** Ignore fallback matches this weak (kills incidental title-token hits). */
+const YOUTUBE_FALLBACK_MIN_SCORE = 20
 
 export interface SpotdlStatus {
   available: boolean
@@ -166,9 +176,124 @@ export async function getSpotdlStatus(event: H3Event): Promise<SpotdlStatus> {
   }
 }
 
-async function runSpotdlSavePreload(
+/**
+ * For songs spotDL failed to match on YouTube Music, search plain YouTube via
+ * Louis's yt-dlp discovery (robust against unavailable/geo-blocked results).
+ *
+ * spotDL's preload save stores unresolvable songs as null entries, so the
+ * names of those songs are recovered from a fast metadata-only spotdl dump
+ * (no `--preload`) keyed by playlist position. Tries `artist - title`, then
+ * bare `title` (nursery recordings are usually indexed under their title, not
+ * a Spotify artist). Capped per resolve to bound wall-clock time.
+ */
+async function youtubeFallbackForUnmatchedSongs(
+  event: H3Event,
+  songs: SpotdlSong[],
+  resource: SpotifyResourceRef,
+): Promise<{ items: YoutubePlaylistImportItem[], found: number, skipped: boolean }> {
+  const unmatchedPositions = songs
+    .map((song, index) => ({ song, index }))
+    .filter(({ song }) => !song || !Boolean(song.download_url || song.downloadUrl))
+    .slice(0, YOUTUBE_FALLBACK_MAX_SEARCHES)
+    .map(({ index }) => index)
+
+  if (unmatchedPositions.length === 0) return { items: [], found: 0, skipped: false }
+
+  let metadataSongs: SpotdlSong[]
+  try {
+    metadataSongs = await runSpotdlSave(event, resource, { preload: false })
+  }
+  catch (err) {
+    console.warn(
+      `${withRequestCtx(event, '[spotdl]')} spotdl metadata dump failed; skipping yt fallback (not caching): ${err instanceof Error ? err.message : String(err)}`,
+    )
+    return { items: [], found: 0, skipped: true }
+  }
+  if (metadataSongs.length === 0) {
+    console.warn(
+      `${withRequestCtx(event, '[spotdl]')} spotdl metadata dump empty; skipping yt fallback (not caching)`,
+    )
+    return { items: [], found: 0, skipped: true }
+  }
+
+  const items: YoutubePlaylistImportItem[] = []
+  let found = 0
+  for (const index of unmatchedPositions) {
+    const meta = metadataSongs[index]
+    if (!meta) continue
+    const track = {
+      title: spotdlSongTitle(meta),
+      artist: spotdlArtistLabel(meta),
+      durationSec: meta.duration !== undefined && meta.duration !== null
+        ? Number(meta.duration)
+        : undefined,
+    }
+    if (track.title === 'Unknown track' || !track.title.trim()) continue
+
+    const queries = [
+      track.artist && track.artist !== 'Spotify'
+        ? `${track.artist} - ${track.title}`
+        : track.title,
+      track.title,
+    ]
+
+    let match: Awaited<ReturnType<typeof searchYoutubeViaYtdlp>>['items'][number] | null = null
+    let usedQuery = ''
+    let bestScore = 0
+    for (const query of queries) {
+      try {
+        const page = await searchYoutubeViaYtdlp(event, { q: query, maxResults: 6 })
+        usedQuery = query
+        for (const result of page.items) {
+          const score = scoreYoutubeFallbackMatch(track, result)
+          if (score >= YOUTUBE_FALLBACK_MIN_SCORE && score > bestScore) {
+            bestScore = score
+            match = result
+            usedQuery = query
+          }
+        }
+      }
+      catch (err) {
+        console.warn(
+          `${withRequestCtx(event, '[spotdl]')} youtube fallback search failed for "${query}": ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+    }
+    if (!match) continue
+
+    const finalDurationSeconds = typeof match.durationSeconds === 'number'
+      ? match.durationSeconds
+      : track.durationSec
+    const songId = typeof meta.song_id === 'string' ? meta.song_id.trim() : ''
+    const spotifyUrl = typeof meta.url === 'string' ? meta.url.trim() : ''
+    const position = typeof meta.list_position === 'number'
+      ? meta.list_position
+      : index + 1
+    const playlistItemId = songId || (spotifyUrl ? `spotify:${spotifyUrl}` : `ytfb:${match.id}:${index}`)
+
+    items.push({
+      playlistItemId,
+      videoId: match.id,
+      position,
+      title: track.title,
+      channelTitle: track.artist || match.channelTitle,
+      thumbnailUrl: (meta.cover_url || meta.coverUrl || '').trim() || match.thumbnailUrl || '',
+      duration: finalDurationSeconds !== undefined ? formatSeconds(finalDurationSeconds) : undefined,
+      durationSeconds: finalDurationSeconds,
+      available: true,
+    })
+    found += 1
+    console.info(
+      `${withRequestCtx(event, '[spotdl]')} yt fallback matched "${track.title}" via "${usedQuery}" -> ${match.id} (${match.title.slice(0, 60)})`,
+    )
+  }
+  return { items, found, skipped: false }
+}
+
+async function runSpotdlSave(
   event: H3Event,
   resource: SpotifyResourceRef,
+  options: { preload: boolean },
 ): Promise<ReturnType<typeof parseSpotdlSaveJson>> {
   const status = await getSpotdlStatus(event)
   if (!status.available || !status.path) {
@@ -185,12 +310,14 @@ async function runSpotdlSavePreload(
   try {
     await writeFile(saveFile, '[]', 'utf8')
 
+    // Without --preload this is a fast metadata-only dump (no YTM search);
+    // used by the plain-YouTube fallback to learn the names of unmatched songs.
     const args = [
       'save',
       resource.url,
       '--save-file',
       saveFile,
-      '--preload',
+      ...(options.preload ? ['--preload'] : []),
       '--client-id',
       clientId,
       '--client-secret',
@@ -198,8 +325,9 @@ async function runSpotdlSavePreload(
       '--log-level',
       'WARNING',
       '--simple-tui',
-      // We only need the YouTube URL mapping — skip per-song lyrics lookups
-      // (genius/musixmatch/azlyrics) which otherwise hit 3 extra providers per track.
+      // We only need the metadata/YouTube URL mapping — skip per-song lyrics
+      // lookups (genius/musixmatch/azlyrics) which otherwise hit 3 extra
+      // providers per track.
       '--lyrics',
     ]
 
@@ -217,7 +345,7 @@ async function runSpotdlSavePreload(
         SPOTIPY_CLIENT_SECRET: clientSecret,
       },
     })
-    console.info(`${withRequestCtx(event, '[spotdl]')} spotdl save took ${Date.now() - startedAt}ms (searchAttempts=${searchAttempts})`)
+    console.info(`${withRequestCtx(event, '[spotdl]')} spotdl save took ${Date.now() - startedAt}ms (${options.preload ? 'preload' : 'metadata'}${options.preload ? ` searchAttempts=${searchAttempts}` : ''})`)
 
     const raw = await readFile(saveFile, 'utf8')
     return parseSpotdlSaveJson(raw)
@@ -266,10 +394,19 @@ export async function resolveSpotifyResourceToYoutube(
     `${withRequestCtx(event, '[spotdl]')} resolve start ${resource.kind}=${resource.id} ${resource.url}${options?.bypassCache ? ' (bypassCache)' : ''}`,
   )
   const startedAt = Date.now()
-  const songs = await runSpotdlSavePreload(event, resource)
-  const { items, unmatched } = mapSpotdlSongsToImportItems(songs)
+  const songs = await runSpotdlSave(event, resource, { preload: true })
+  const spotdlMap = mapSpotdlSongsToImportItems(songs)
   console.info(
-    `${withRequestCtx(event, '[spotdl]')} resolve done ${resource.kind}=${resource.id} in ${Date.now() - startedAt}ms -> ${items.length} items, ${unmatched} unmatched`,
+    `${withRequestCtx(event, '[spotdl]')} resolve done ${resource.kind}=${resource.id} in ${Date.now() - startedAt}ms -> ${spotdlMap.items.length} items, ${spotdlMap.unmatched} unmatched (spotdl pass)`,
+  )
+
+  // Fallback: spotDL only searches YouTube Music. Hunt unmatched songs on
+  // plain YouTube (kids' songs, nursery rhymes, etc.) via Louis's yt-dlp.
+  const fallback = await youtubeFallbackForUnmatchedSongs(event, songs, resource)
+  const items = [...spotdlMap.items, ...fallback.items]
+  const unmatched = spotdlMap.unmatched - fallback.found
+  console.info(
+    `${withRequestCtx(event, '[spotdl]')} resolve done (with fallback) -> ${items.length} items, ${unmatched} unmatched (yt fallback found ${fallback.found}${fallback.skipped ? ', SKIPPED' : ''})`,
   )
 
   let playlist: SpotifyResolveResponse['playlist']
@@ -312,6 +449,8 @@ export async function resolveSpotifyResourceToYoutube(
     unmatched,
     resolver: 'spotdl',
   }
-  resolveCache.set(cacheKey, { until: Date.now() + RESOLVE_CACHE_MS, value })
+  if (!fallback.skipped) {
+    resolveCache.set(cacheKey, { until: Date.now() + RESOLVE_CACHE_MS, value })
+  }
   return value
 }
